@@ -1,0 +1,199 @@
+Kellogg Lab 454 16S-tag sequencing workflow, Open Reference OTU picking (June 2015)
+Author: Christina A. Kellogg
+
+> print_qiime_config.py
+
+	#Tells you versions of QIIME and its internal parts (e.g., PyNAST)
+
+
+> validate_mapping_file.py -m Mapping_File.txt -o mapping_output
+
+	#This checks to make sure your mapping file is formatted correctly
+
+
+> process_sff.py -i sff/ -f -o Output_dir
+
+	#Converts a directory of sff files from sequencing facility into a form QIIME can use
+	#Generates quality files, fasta files, and flowgram files (for denoising step)
+
+	
+> split_libraries.py -m Mapping_File.txt -f Output_dir/1.TCA.454Reads.fna,Output_dir/2.TCA.454Reads.fna -q Output_dir/1.TCA.454Reads.qual,Output_dir/2.TCA.454Reads.qual -w 50 -g -r -l 200 -L 700 -M 1 -b 10 -n 1000000 -o split_libraries_output
+ 
+ 	#Will need to do this separately for each plate
+	#Sorts libraries by sample using the barcodes in the mapping file to label fasta files
+	#Assigns a number to each sequence so files can be concatenated later
+	#Set minimum sequence length (-1) to 200 bp, (-L) maximum to 700 bp (defaults are 200 and 1000)
+	#Filters sequences for quality using a running quality window of 50 bp (-w 50) and discards sequences containing bad windows (-g)
+	#Removing unassigned reads (-r)
+	#Using default min avg qual score 25
+	#Maximum primer mismatches (-M) 1 (default 0)
+	#Using default maximum homopolymer length of 6
+	#Barcode length (-b) = 10
+	#Sequence ID to use for first sequence (-n) = 1000000 for first plate and 2000000 for second plate (default 1)
+
+	
+> cat split_libraries_output1/seq.fna split_libraries_output2/seq.fna > combined.fna
+	
+	#Concatenates the two fasta files from the separate plates into a single file for subsequent processing
+	#use grep to check number of sequences in each input file and resulting combined output file
+
+
+> mkdir Denoise_preprocess
+	
+	#For some reason, the next script throws an error ("Creating temporary directory failed") if you don't create the output directory first
+
+
+> denoiser_preprocess.py -i Output_dir/Example1_sff.txt,Output_dir/Example2_sff.txt,Output_dir/Example3_sff.txt, Output_dir/Example4_sff.txt -f combined.fna -p AYTGGGYDTAAAGNG -o Denoise_preprocess
+ 
+ 	#Runs first clustering phase which groups reads based on common prefixes
+ 	#Removes primer sequence (-p) specified from reads before running phase 1
+ 
+ 	 	
+> denoiser.py -i Output_dir/Example1_sff.txt,Output_dir/Example2_sff.txt,Output_dir/Example3_sff.txt, Output_dir/Example4_sff.txt	-f combined.fna -p Denoised_preprocess -o Denoised_final --titanium
+ 
+ 	#Removes sequencing noise characteristic to pyrosequencing by flowgram clustering
+ 	# -p flag tells it not to do Phase I preprocess, instead use output from denoiser_preprocess.py
+ 	# --titanium tells it to use titanium error profile
+ 	# if it throws a memory error, can try again using flag --low_memory
+
+
+> inflate_denoiser_output.py -c Denoised_final/centroids.fasta -s Denoised_final/singletons.fasta -f combined.fna -d Denoised_final/denoiser_mapping.txt -o inflated_seqs.fna
+  
+  	#Inflates denoiser results so they can be passed directly to OTU picker
+  	#NOT ABUNDANCE SORTED, but confirmed w/ developers ok to use usearch61 instead of uclust
+
+
+> truncate_reverse_primer.py -f inflated_seqs.fna -m Mapping_File.txt -o reverse_primer_removed/
+
+	#Removes reverse primer sequences, if present. Leaving them can interfere with otu picking.
+
+	
+> split_sequence_file_on_sample_ids.py -i reverse_primer_removed/inflated_seqs_rev_primer_truncated.fna	-o Out_countseqs/
+	
+	#Splitting into individual sample files so we can count the number of sequences in each and decide if any poor runs need to be removed
+
+	
+> cd Out_countseqs/
+> count_seqs.py -i "*.fasta"
+
+	#Prints to screen a list of the number of sequence files in each sample, so we can ID poor runs for removal before rarefaction
+
+	
+> extract_seqs_by_sample_id.py -i reverse_primer_removed/inflated_seqs_rev_primer_truncated.fna -o outseqs.fasta -s Sample1,Sample2,Sample3 -n
+
+	#Creates an fna file containing all samples sequences EXCEPT the ones we've listed; those should be removed.
+	#Check results by resplitting and counting
+		#>split_sequence_file_on_sample_ids.py -i outseqs.fasta	-o Out_countseqs2/
+		#> cd Out_countseqs2/
+		#> count_seqs.py -i "*.fasta"
+	#So now outseqs.fasta is the new combined files with all the samples we want to process further	
+
+	
+> pick_open_reference_otus.py -i outseqs.fasta -m usearch61 -o usearch61_openref_Green/ -f 
+
+	#Only way to implement new sub-sampled open-reference clustering; Rideout et al. (2014) https://peerj.com/articles/545/
+	#Runs pick_otus.py, pick_rep_set.py, align_seqs.py, assign_taxonomy.py, make_otu_table.py, make_phylogeny.py
+	#use usearch61 instead of uclust b/c better AND has chimera-checking incorporated
+	#Alignment is performed with PyNAST, taxonomy is assigned with uclust
+	#Singletons are removed from the OTU table as a default (--min_otu_size = 2)
+	#Default reference database is greengenes 
+	#Can use flags -r and -p and parameter file to switch to SILVA reference database (see next line for script)
+	#pick_open_reference_otus.py -i outseqs.fasta -m usearch61 -o usearch61_openref_Silva/ -f -p parameters_Silva.txt -r /home/ubuntu/Silva_108_database_curated/97_rep_set_Silva_108.fasta 
+
+	
+> filter_taxa_from_otu_table.py -i otu_table_mc2_w_tax.biom -o otu_table_final.biom -n c__Chloroplast,f__mitochondria
+	
+	#Use to remove any Chloroplast and mitochondrial sequences.
+	#Use grep rep_set_tax_assignments.txt to determine if any non-Bacterial sequences ("k__A" "k__E"). If so will need to remove those too.
+	#Use >biom convert -i file.biom -o file.txt --to-tsv   to make a viewable file, and use > wc -l file.txt to count lines
+
+
+> biom summarize_table -i otu_table_final.biom -o summary_otu_table_final.txt
+	
+	#Use 'more' to look at output table. Gives seq numbers so you can determine lowest sample number for rarefaction
+
+	
+> single_rarefaction.py -i otu_table_final.biom -o otu_table_final_rarefiedXXXXX.biom -d XXXXX
+	
+	#Where XXXXX is the lowest number of sequences; Alpha rarefaction step
+
+
+> biom summarize_table -i otu_table_final_rarefiedXXXX.biom -o summary_otu_table_rarefiedXXXX.txt
+	
+	#Use 'more' to look at output table to confirm rarefaction worked and all samples are XXXXX
+
+
+> mkdir Alpha_Diversity_rareXXXXX/
+	
+	#Need output directory for next steps	
+
+
+> alpha_diversity.py -i otu_table_final_rarefiedXXXXX.biom -m ace,chao1,observed_otus,simpson_reciprocal,shannon,simpson,simpson_e -o Alpha_Diversity_rareXXXXX/Alpha_Diversity_rareXXXXX.txt -t rep_set.tre
+	
+	#Use  > head Alpha_Diversity_rareXXXXX/Alpha_Diversity_rareXXXXX.txt to look at file
+
+
+> summarize_taxa_through_plots.py -o Alpha_Diversity_rareXXXXX/taxa_summaryXXXXX/ -i otu_table_final_rarefiedXXXXX.biom 
+	
+	#Creates bar graph files showing relative abundance at levels from Phylum to Genus!
+	
+	
+> scp -i <keyfile> ubuntu@[instance]:~/WorkingDirectory/usearch61_openref_Green/Alpha_Diversity_rareXXXXX/taxa_summaryXXXXX/taxa_summary_plots/bar_charts.html ~/Desktop
+> scp -i <keyfile> ubuntu@[instance]:~/WorkingDirectory/usearch61_openref_Green/Alpha_Diversity_rareXXXXX/taxa_summaryXXXXX/taxa_summary_plots/area_charts.html ~/Desktop
+> scp -r -i <keyfile> ubuntu@e[instance]:~/WorkingDirectory/usearch61_openref_Green/Alpha_Diversity_rareXXXXX/taxa_summaryXXXXX/taxa_summary_plots/charts ~/Desktop
+	
+	#Open separate terminal window on local computer and use the above commands to transfer alpha diversity results from EC2 to local
+
+
+> beta_diversity.py -i otu_table_final_rarefiedXXXXX.biom -m unweighted_unifrac,weighted_unifrac,binary_sorensen_dice,bray_curtis -o compar_div_rareXXXXX/ -t rep_set.tre
+
+	#To compare weighted/uweighted and phylogenetic/taxonomic metrics
+	
+	
+> beta_significance.py -i otu_table_final_rarefiedXXXX.biom -t rep_set.tre -s unweighted_unifrac -o unw_sig.txt
+
+	#Determining if samples are statistically significantly different from each other
+	#Default 100 monte carlo randomizations
+	#Unweighted unifrac (so abundance doesn't matter, just presence/absence of taxa)
+
+
+> beta_significance.py -i otu_table_final_rarefiedXXXX.biom -t rep_set.tre -s weighted_unifrac -o w_sig.txt
+
+	#Determining if samples are statistically significantly different from each other
+	#Default 100 monte carlo randomizations
+	#Weighted unifrac (so abundance matters)
+
+	
+> scp -i <keyfile> ubuntu@[instance]:~/WorkingDirectory/usearch61_openref_Green/compar_div_rareXXXXX/*.txt  ~/Desktop
+
+	#Open separate terminal window on local computer and use above commands to transfer beta diversity metrics from EC2 to local
+	
+	
+> principal_coordinates.py -i compar_div_rareXXXXX/ -o compar_div_rareXXXXX_PCoA/
+
+	#Conducts principal coordinate analysis on each of the beta diversity stats (e.g., unweighted unifrac)
+
+
+> make_2d_plots.py -i compar_div_rareXXXXX_PCoA/pcoa_weighted_unifrac_otu_table_final_rarefiedXXXXX.txt -m ../Mapping_File.txt -o PCoA_2D_plot_WU/
+	
+	#Visualizing 2D PCoA plots based on weighted unifrac OTU table
+	#Will make nicer versions in R for publication; these are just to see patterns
+
+
+> scp -r -i <keyfile> ubuntu@[instance]:~/WorkingDirectory/usearch61_openref_Green/PCoA_2D_plot_WU/ ~/Desktop 
+
+	#Open separate terminal window on local computer and use above commands to transfer PCoA 2D figures from EC2 to local
+
+
+> make_otu_heatmap.py -i Alpha_Diversity_rareXXXXX/taxa_summaryXXXXXX/otu_table_final_rarefiedXXXXX_L2.biom -o heatmap_L2_rareXXXXX.pdf
+
+	#Making heatmap at Phylum level
+
+
+> compute_core_microbiome.py -i otu_table_final_rarefiedXXXX.biom -o otu_core_everybody
+	
+	#Looking for commonality across all samples
+	
+	
+> compute_core_microbiome.py -i otu_table_final_rarefiedXXXX.biom -o otu_core_specific --mapping_fp Mapping_File.txt --valid_states "Location:Atlantic"
+	#Looking at core of Atlantic samples only
